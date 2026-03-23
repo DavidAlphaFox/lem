@@ -1,27 +1,76 @@
+;;;; defcommand.lisp - Lem 编辑器命令系统
+;;;;
+;;;; 本文件实现 Lem 的交互式命令定义系统。
+;;;; 命令是用户可通过 M-x 或键绑定调用的操作。
+;;;;
+;;;; 核心概念:
+;;;; - define-command: 定义交互式命令的宏
+;;;; - 参数描述符: 声明命令如何获取参数
+;;;; - primary-command: 命令基类
+;;;;
+;;;; 参数描述符类型:
+;;;;   :universal (p)     - 通用参数（前缀参数），默认 1
+;;;;   :universal-nil (P) - 通用参数，默认 nil
+;;;;   :string (s)        - 提示用户输入字符串
+;;;;   :number (n)        - 提示用户输入数字
+;;;;   :buffer (b)        - 提示选择缓冲区
+;;;;   :other-buffer (B)  - 提示选择其他缓冲区
+;;;;   :file (f)          - 提示选择文件
+;;;;   :new-file (F)      - 提示输入新文件名
+;;;;   :region (r)        - 传递区域起点和终点
+;;;;   :splice            - 插入自定义代码
+;;;;
+;;;; 相关文件:
+;;;;   - src/command.lisp: 命令执行和查找
+;;;;   - src/keymap.lisp: 键绑定到命令
+;;;;   - src/interp.lisp: 命令循环
+
 (in-package :lem-core)
 
+;;; ============================================================================
+;;; 警告收集
+;;; ============================================================================
+
+;; 编辑器警告列表（用于收集弃用警告等）
 (defvar *editor-warnings* '())
 
 (eval-when (:compile-toplevel :load-toplevel)
   (defun editor-warning (fmt &rest args)
+    "记录编辑器警告信息。
+     警告会在初始化后显示在 *EDITOR WARNINGS* 缓冲区中。"
     (push (apply #'format nil fmt args) *editor-warnings*)
     (values))
 
+;;; ============================================================================
+;;; 参数描述符解析
+;;; ============================================================================
+
   (defun parse-arg-descriptors (arg-descriptors universal-argument)
-    "Parse arg descriptors given to define-command.
-
-Descriptors (old char in parenthesis):
-
-:universal (p) -> universal argument, defaults to 1. Don't prompt for anything.
-:universal-nil (P) -> universal argument
-:string (s) -> prompt for string
-:number (n) -> prompt for integer
-:buffer (b) -> prompt for a buffer, defaults to the current-buffer's name
-:other-buffer (B) -> prompt for buffer, defaults to the other buffer's name
-:file (f) -> prompt for a file, defaults to the buffer directory
-:new-file (F) -> prompt for a file, defaults to the buffer directory, must not be existing
-:region (r) -> operate on the region.
-:splice -> splice in your own code returning a value or list of values"
+    "解析命令参数描述符。
+     
+     参数描述符声明命令如何获取参数值。
+     支持两种格式：
+       - 新格式: (:string \"Prompt: \"), (:universal), (:file \"File: \")
+       - 旧格式: \"sPrompt: \", \"p\", \"fFile: \"（已弃用）
+     
+     参数:
+       arg-descriptors: 描述符列表
+       universal-argument: 通用参数变量名
+     
+     返回:
+       生成参数列表的表达式
+     
+     描述符类型:
+       :universal / :universal-1 -> 通用参数，默认 1
+       :universal-nil           -> 通用参数，默认 nil
+       :string                  -> 提示输入字符串
+       :number                  -> 提示输入整数
+       :buffer                  -> 提示选择缓冲区
+       :other-buffer            -> 提示选择其他缓冲区
+       :file                    -> 提示选择现有文件
+       :new-file                -> 提示输入新文件名
+       :region                  -> 传递区域起点和终点
+       :splice                  -> 插入自定义代码返回值"
     (let* ((pre-forms '())
            (forms
              (mapcar
@@ -94,7 +143,13 @@ Descriptors (old char in parenthesis):
              ,(parse-arg-descriptors arg-descriptors universal-argument)
            (apply #',fn-name ,arguments))))))
 
+;;; ============================================================================
+;;; 命令注册
+;;; ============================================================================
+
 (defun check-already-defined-command (name source-location)
+  "检查命令是否已在其他文件中定义（仅 SBCL）。
+   如果已定义，发出继续/中断错误。"
   #+sbcl
   (alexandria:when-let* ((command (get-command name))
                          (command-source-location (command-source-location command)))
@@ -106,44 +161,64 @@ Descriptors (old char in parenthesis):
               (sb-c:definition-source-location-namestring (command-source-location command))))))
 
 (defun register-command (command &key mode-name command-name)
+  "注册命令到全局命令表。
+   
+   参数:
+     command: 命令实例
+     mode-name: 关联的模式名称（可选）
+     command-name: 命令字符串名称（用于 M-x）"
   (when mode-name
     (associate-command-with-mode mode-name command))
   (add-command command-name command))
 
+;;; ============================================================================
+;;; define-command 宏
+;;; ============================================================================
+
 (defmacro define-command (name-and-options params (&rest arg-descriptors) &body body)
-  "Define an interactive command that is callable with M-x.
-
-Example:
-
-(define-command write-hello () ()
-  (insert-string (current-point) \"hello\"))
-
-A command can accept an universal argument. Use the :universal or \"p\" descriptor and add a parameter.
-
-Example:
-
-(define-command write-hellos (n) (:universal)
-  (dotimes (i n)
-    (insert-string (current-point) \"hello \")))
-
-and call it with C-u 3 M-x write-hellos RET.
-
-With :universal the argument defaults to 1, while :universal-nil (\"P\") is
-similar and defaults to nil.
-
-Other argument descriptors are available (old-style char in parenthesis):
-
-   :string (s) -> prompt for a string. Use (:string \"My prompt\") or
-                  \"sMy prompt: \" to give a custom prompt.
-   :number (n) -> prompt for an integer.
-   :buffer (b) -> prompt for a buffer, defaults to the current-buffer's name.
-   :other-buffer (B) -> prompt for buffer, defaults to the other buffer's name.
-   :file (f) -> prompt for a file, defaults to the buffer directory.
-   :new-file (F) -> prompt for a file, defaults to the buffer directory, must
-                    not be existing.
-   :region (r) -> operate on the region. Needs two arguments, the `start` and
-                  `end` positions of the region.
-   :splice -> splice in your own code returning a list of values."
+  "定义交互式命令。
+   
+   命令可通过以下方式调用:
+     - M-x 命令名
+     - 键绑定
+     - 程序调用
+   
+   基本示例:
+     (define-command write-hello () ()
+       (insert-string (current-point) \"hello\"))
+   
+   带通用参数的命令:
+     (define-command write-hellos (n) (:universal)
+       (dotimes (i n)
+         (insert-string (current-point) \"hello \")))
+     
+     调用: C-u 3 M-x write-hellos RET
+   
+   参数描述符:
+     :universal (p)       - 通用参数，默认 1
+     :universal-nil (P)   - 通用参数，默认 nil
+     :string (s)          - 提示输入字符串
+     :number (n)          - 提示输入整数
+     :buffer (b)          - 提示选择缓冲区
+     :other-buffer (B)    - 提示选择其他缓冲区
+     :file (f)            - 提示选择文件
+     :new-file (F)        - 提示输入新文件名
+     :region (r)          - 传递区域起点和终点（需要两个参数）
+     :splice              - 插入自定义代码
+   
+   选项:
+     (:class class-name)  - 指定命令类名
+     (:name \"cmd-name\")  - 指定 M-x 中的命令名
+     (:mode mode-name)    - 关联到模式
+     (:advice-classes)    - 指定 advice 类
+   
+   字符串提示示例:
+     (define-command find-file (filename) ((:file \"Find file: \"))
+       (find-file filename))
+   
+   区域操作示例:
+     (define-command upcase-region (start end) (:region)
+       (uppercase-region start end))"
   (destructuring-bind (name . options) (uiop:ensure-list name-and-options)
     (let ((advice-classes (alexandria:assoc-value options :advice-classes))
           (class-name (alexandria:if-let (elt (assoc :class options))
@@ -165,40 +240,66 @@ Other argument descriptors are available (old-style char in parenthesis):
                                           #+sbcl (sb-c:source-location)
                                           #-sbcl nil)
 
-           (defun ,name ,params
-             ;; If you call it directly instead of using `call-command`:
-             ;;   - *this-command* will not be bound
-             ;;   - the execute-hook will not be called
-             ,@body)
+            ;; 定义命令函数
+            ;; 注意：直接调用此函数（而非通过 call-command）时：
+            ;;   - *this-command* 不会被绑定
+            ;;   - execute-hook 不会被调用
+            (defun ,name ,params
+              ,@body)
 
-           (register-command-class ',name ',class-name)
-           (defclass ,class-name (primary-command ,@advice-classes)
-             ()
-             (:default-initargs
-              :source-location #+sbcl (sb-c:source-location) #-sbcl nil
-              :name ',name
-              ,@initargs))
+            ;; 注册命令类
+            (register-command-class ',name ',class-name)
+            
+            ;; 定义命令类（继承 primary-command 和 advice 类）
+            (defclass ,class-name (primary-command ,@advice-classes)
+              ()
+              (:default-initargs
+               :source-location #+sbcl (sb-c:source-location) #-sbcl nil
+               :name ',name
+               ,@initargs))
 
-           (defmethod execute (mode (,command ,class-name) ,universal-argument)
-             (declare (ignorable ,universal-argument))
-             ,(gen-defcommand-body name
-                                   universal-argument
-                                   arg-descriptors))
+            ;; 定义 execute 方法：处理参数描述符并调用命令函数
+            (defmethod execute (mode (,command ,class-name) ,universal-argument)
+              (declare (ignorable ,universal-argument))
+              ,(gen-defcommand-body name
+                                    universal-argument
+                                    arg-descriptors))
 
-           (register-command (make-instance ',class-name)
-                             :mode-name ',mode-name
-                             :command-name ,command-name))))))
+            ;; 注册命令到全局命令表
+            (register-command (make-instance ',class-name)
+                              :mode-name ',mode-name
+                              :command-name ,command-name))))))
 
-#|
-(defclass foo-advice () ())
-
-(define-command (foo-1 (:advice-classes foo-advice)) (p) ("p")
-...body)
-
-(define-command (foo-2 (:advice-classes foo-advice)) (s) ("sInput: ")
-...body)
-
-(defmethod execute (mode (command foo-advice) argument)
-;; :advice-classesをfoo-adviceにしたfoo-1とfoo-2コマンドだけが呼び出される
-)
-|#
+;;; ============================================================================
+;;; Advice 示例
+;;; ============================================================================
+;;;
+;;; Advice 类允许在特定命令执行前后添加自定义逻辑。
+;;;
+;;; 示例：
+;;;   ;; 定义 advice 类
+;;;   (defclass my-advice () ())
+;;;   
+;;;   ;; 为 advice 类定义 execute 方法
+;;;   (defmethod execute (mode (command my-advice) argument)
+;;;     (format t "Before command: ~A~%" (command-name command))
+;;;     (call-next-method)  ; 执行实际命令
+;;;     (format t "After command: ~A~%" (command-name command)))
+;;;   
+;;;   ;; 定义使用 advice 的命令
+;;;   (define-command (my-cmd (:advice-classes my-advice)) () ()
+;;;     (message "Hello!"))
+;;;
+;;; #|
+;;; (defclass foo-advice () ())
+;;; 
+;;; (define-command (foo-1 (:advice-classes foo-advice)) (p) ("p")
+;;; ...body)
+;;; 
+;;; (define-command (foo-2 (:advice-classes foo-advice)) (s) ("sInput: ")
+;;; ...body)
+;;; 
+;;; (defmethod execute (mode (command foo-advice) argument)
+;;; ;; 只有 :advice-classes 为 foo-advice 的命令会被调用此方法
+;;; )
+;;; |#
