@@ -1,3 +1,43 @@
+;;;; lsp-mode.lisp - LSP 模式主模块
+;;;;
+;;;; 本文件实现了 Lem 编辑器的 Language Server Protocol (LSP) 客户端。
+;;;; LSP 是编辑器与语言服务器之间的标准化通信协议，提供代码补全、
+;;;; 跳转定义、重构等功能。
+;;;;
+;;;; 主要功能：
+;;;; 1. lsp-mode 次模式：为缓冲区启用 LSP 功能
+;;;; 2. 工作区管理：管理语言服务器实例和工作区
+;;;; 3. 文本同步：跟踪缓冲区变化并同步到服务器
+;;;; 4. 语言特性：补全、悬停、签名帮助、定义跳转等
+;;;; 5. 诊断显示：显示服务器返回的错误和警告
+;;;;
+;;;; 支持的 LSP 特性：
+;;;; - [x] textDocument/completion - 代码补全
+;;;; - [x] textDocument/hover - 悬停信息
+;;;; - [x] textDocument/signatureHelp - 签名帮助
+;;;; - [x] textDocument/definition - 跳转定义
+;;;; - [x] textDocument/typeDefinition - 跳转类型定义
+;;;; - [x] textDocument/implementation - 跳转实现
+;;;; - [x] textDocument/references - 查找引用
+;;;; - [x] textDocument/documentHighlight - 文档高亮
+;;;; - [x] textDocument/documentSymbol - 文档符号
+;;;; - [x] textDocument/codeAction - 代码操作
+;;;; - [x] textDocument/formatting - 格式化
+;;;; - [x] textDocument/rangeFormatting - 范围格式化
+;;;; - [x] textDocument/rename - 重命名
+;;;; - [x] textDocument/publishDiagnostics - 诊断信息
+;;;;
+;;;; 使用方法：
+;;;; 1. 使用 define-language-spec 定义语言配置
+;;;; 2. 打开对应语言的文件，lsp-mode 自动启用
+;;;; 3. 使用 M-x lsp-* 命令访问 LSP 功能
+;;;;
+;;;; 相关文件：
+;;;; - spec.lisp: 语言规范定义
+;;;; - client.lisp: 客户端抽象
+;;;; - lem-stdio-transport.lisp: STDIO 传输
+;;;; - lsp-base/: LSP 基础库
+
 (defpackage :lem-lsp-mode/lsp-mode
   (:nicknames :lem-lsp-mode)
   (:use :cl
@@ -26,21 +66,32 @@
            :without-lsp-mode))
 (in-package :lem-lsp-mode/lsp-mode)
 
-;; FIXME:
-;; dirty hack.
-;; Ideally, improve lsp-mode to work within markdown code blocks.
+;;; ============================================================================
+;;; 模式控制
+;;; ============================================================================
+
+;; *disable* - 临时禁用 lsp-mode 的标志
+;; 用于在 markdown 代码块中禁用 lsp-mode，避免意外行为
+;; FIXME: 这是一个临时解决方案，理想情况下应该让 lsp-mode 在代码块中正常工作
 (defvar *disable* nil
   "This variable is used to temporarily disable lsp-mode.
 Its purpose is to disable lsp-mode in a code block within markdown-mode, which can cause unexpected behavior in lsp-mode.
 Setting this variable to T while working within a markdown code block will avoid this problem.")
 
+;; without-lsp-mode - 临时禁用 lsp-mode 的宏
+;; 在 body 执行期间禁用 lsp-mode
 (defmacro without-lsp-mode (() &body body)
   "This macro prevents enabling lsp-mode within the body.
 Use this when lsp-mode has side effects that you want to avoid."
   `(let ((*disable* T))
      ,@body))
 
-;;;
+;;; ============================================================================
+;;; 错误处理
+;;; ============================================================================
+
+;; not-found-program - 程序未找到错误
+;; 当语言服务器程序未安装时触发
 (define-condition not-found-program (editor-error)
   ((name :initarg :name
          :initform (required-argument :name)
@@ -52,6 +103,7 @@ Use this when lsp-mode has side effects that you want to avoid."
              (with-slots (name spec) c
                (format s (gen-install-help-message name spec))))))
 
+;; gen-install-help-message - 生成安装帮助消息
 (defun gen-install-help-message (program spec)
   (with-output-to-string (out)
     (format out "\"~A\" is not installed." program)
@@ -62,14 +114,20 @@ Use this when lsp-mode has side effects that you want to avoid."
     (when (spec-readme-url spec)
       (format out "~&~%See follow for the readme URL~2% ~A ~%" (spec-readme-url spec)))))
 
+;; check-exist-program - 检查程序是否存在
 (defun check-exist-program (program spec)
   (unless (exist-program-p program)
     (error 'not-found-program :name program :spec spec)))
 
-;;;
+;;; ============================================================================
+;;; 服务器启动
+;;; ============================================================================
+
+;; server-process-buffer-name - 获取服务器进程缓冲区名称
 (defun server-process-buffer-name (spec)
   (format nil "*Lsp <~A>*" (spec-language-id spec)))
 
+;; run-server-using-mode :tcp - 通过 TCP 启动服务器
 (defmethod run-server-using-mode ((mode (eql :tcp)) spec)
   (flet ((output-callback (string)
            (let* ((buffer (make-buffer (server-process-buffer-name spec)))
@@ -82,16 +140,22 @@ Use this when lsp-mode has side effects that you want to avoid."
                       (lem-process:run-process command :output-callback #'output-callback))))
       (make-instance 'client:tcp-client :process process :port port))))
 
+;; run-server-using-mode :stdio - 通过 STDIO 启动服务器
 (defmethod run-server-using-mode ((mode (eql :stdio)) spec)
   (let ((command (get-spec-command spec)))
     (check-exist-program (first command) spec)
     (let ((process (async-process:create-process command :nonblock nil)))
       (make-instance 'client:stdio-client :process process))))
 
+;; run-server - 启动语言服务器
 (defmethod run-server (spec)
   (run-server-using-mode (spec-connection-mode spec) spec))
 
-;;;
+;;; ============================================================================
+;;; JSON-RPC 错误处理
+;;; ============================================================================
+
+;; with-jsonrpc-error - 捕获 JSON-RPC 错误的宏
 (defmacro with-jsonrpc-error (() &body body)
   (with-unique-names (c)
     `(handler-case (progn ,@body)
@@ -101,6 +165,11 @@ Use this when lsp-mode has side effects that you want to avoid."
 (defun jsonrpc-editor-error (message code)
   (editor-error "JSONRPC-CALLBACK-ERROR: ~A (Code=~A)" message code))
 
+;; async-request - 发送异步 LSP 请求
+;; 参数: client - LSP 客户端
+;;       request - 请求类型（如 'textDocument/completion）
+;;       params - 请求参数
+;;       :then - 成功回调
 (defun async-request (client request params &key then)
   (request:request-async client
                          request
@@ -110,6 +179,7 @@ Use this when lsp-mode has side effects that you want to avoid."
                          (lambda (message code)
                            (send-event (lambda () (jsonrpc-editor-error message code))))))
 
+;; display-message - 显示 LSP 消息
 (defun display-message (text &key style source-window)
   (when text
     (show-message text
@@ -117,70 +187,93 @@ Use this when lsp-mode has side effects that you want to avoid."
                   :timeout nil
                   :source-window source-window)))
 
+;; make-temporary-unwrap-buffer - 创建临时的不换行缓冲区
 (defun make-temporary-unwrap-buffer ()
   (let ((buffer (make-buffer nil :temporary t :enable-undo-p nil)))
     (setf (variable-value 'lem:line-wrap :buffer buffer) nil)
     buffer))
 
-;;;
+;;; ============================================================================
+;;; 缓冲区信息
+;;; ============================================================================
+
+;; buffer-language-spec - 获取缓冲区的语言规范
 (defun buffer-language-spec (buffer)
   (get-language-spec (language-mode:buffer-language-mode buffer)))
 
+;; buffer-language-id - 获取缓冲区的语言 ID
 (defun buffer-language-id (buffer)
   (when-let (spec (buffer-language-spec buffer))
     (spec-language-id spec)))
 
+;; buffer-version - 获取缓冲区版本（修改计数）
 (defun buffer-version (buffer)
   (buffer-modified-tick buffer))
 
+;; buffer-uri - 获取缓冲区的 URI
 (defun buffer-uri (buffer)
   ;; TODO: lem-language-server::buffer-uri
   (if (buffer-filename buffer)
       (pathname-to-uri (buffer-filename buffer))
       (format nil "buffer://~A" (buffer-name buffer))))
 
+;; compute-root-uri - 计算工作区根 URI
 (defun compute-root-uri (spec buffer)
   (pathname-to-uri
    (language-mode:find-root-directory (buffer-directory buffer)
                                       (spec-root-uri-patterns spec))))
 
-;;;
+;;; ============================================================================
+;;; 工作区
+;;; ============================================================================
+
+;; workspace - LSP 工作区
+;; 管理一个语言服务器实例及其关联的缓冲区
 (defclass workspace ()
   ((root-uri
     :initarg :root-uri
     :initform nil
-    :accessor workspace-root-uri)
+    :accessor workspace-root-uri
+    :documentation "工作区根 URI")
    (client
     :initarg :client
     :initform nil
-    :accessor workspace-client)
+    :accessor workspace-client
+    :documentation "LSP 客户端实例")
    (spec
     :initarg :spec
     :initform nil
-    :accessor workspace-spec)
+    :accessor workspace-spec
+    :documentation "语言规范")
    (server-capabilities
     :initarg :server-capabilities
     :initform nil
-    :accessor workspace-server-capabilities)
+    :accessor workspace-server-capabilities
+    :documentation "服务器能力")
    (server-info
     :initarg :server-info
     :initform nil
-    :accessor workspace-server-info)
+    :accessor workspace-server-info
+    :documentation "服务器信息")
    (trigger-characters
     :initarg :trigger-characters
     :initform (make-hash-table)
-    :accessor workspace-trigger-characters)
+    :accessor workspace-trigger-characters
+    :documentation "触发字符映射")
    (plist
     :initarg :plist
     :initform nil
-    :accessor workspace-plist)))
+    :accessor workspace-plist
+    :documentation "扩展属性列表")))
 
+;; make-workspace - 创建工作区实例
 (defun make-workspace (&key spec client buffer)
   (make-instance 'workspace
                  :spec spec
                  :client client
                  :root-uri (compute-root-uri spec buffer)))
 
+;; workspace-value - 获取工作区扩展属性
 (defun workspace-value (workspace key &optional default)
   (getf (workspace-plist workspace) key default))
 
@@ -188,15 +281,20 @@ Use this when lsp-mode has side effects that you want to avoid."
   (declare (ignore default))
   (setf (getf (workspace-plist workspace) key) value))
 
+;; workspace-language-id - 获取工作区的语言 ID
 (defun workspace-language-id (workspace)
   (spec-language-id (workspace-spec workspace)))
 
+;; get-workspace-from-point - 从点获取工作区
 (defun get-workspace-from-point (point)
   (buffer-workspace (point-buffer point)))
 
+;; dispose-workspace - 释放工作区资源
 (defun dispose-workspace (workspace)
   (client:dispose (workspace-client workspace)))
 
+;; set-trigger-characters - 设置触发字符
+;; 配置补全和签名帮助的触发字符
 (defun set-trigger-characters (workspace)
   (dolist (character (get-completion-trigger-characters workspace))
     (setf (gethash character (workspace-trigger-characters workspace))
@@ -205,13 +303,18 @@ Use this when lsp-mode has side effects that you want to avoid."
     (setf (gethash character (workspace-trigger-characters workspace))
           #'lsp-signature-help-with-trigger-character)))
 
-;;;
+;;; ============================================================================
+;;; 工作区管理
+;;; ============================================================================
+
+;; *workspace-list-per-language-id* - 按语言 ID 组织的工作区列表
 (defvar *workspace-list-per-language-id* (make-hash-table :test 'equal))
 
 (defstruct workspace-list
   current-workspace
   workspaces)
 
+;; add-workspace - 添加工作区到列表
 (defun add-workspace (workspace)
   (if-let (workspace-list (gethash (workspace-language-id workspace)
                                    *workspace-list-per-language-id*))
@@ -224,34 +327,45 @@ Use this when lsp-mode has side effects that you want to avoid."
           (make-workspace-list :current-workspace workspace
                                :workspaces (list workspace)))))
 
+;; change-workspace - 切换当前工作区
 (defun change-workspace (workspace)
   (let ((workspace-list (gethash (workspace-language-id workspace)
                                  *workspace-list-per-language-id*)))
     (assert workspace-list)
     (setf (workspace-list-current-workspace workspace-list) workspace)))
 
+;; find-workspace - 查找语言对应的工作区
 (defun find-workspace (language-id &key (errorp t))
   (if-let (workspace-list (gethash language-id *workspace-list-per-language-id*))
     (workspace-list-current-workspace workspace-list)
     (when errorp
       (error "The ~A workspace is not found." language-id))))
 
+;; buffer-workspace - 获取缓冲区的工作区
 (defun buffer-workspace (buffer &optional (errorp t))
   (find-workspace (buffer-language-id buffer) :errorp errorp))
 
+;; all-workspaces - 获取所有工作区
 (defun all-workspaces ()
   (loop :for workspace-list :being :each :hash-value :in *workspace-list-per-language-id*
         :append (workspace-list-workspaces workspace-list)))
 
+;; dispose-all-workspaces - 释放所有工作区
 (defun dispose-all-workspaces ()
   (dolist (workspace (all-workspaces))
     (dispose-workspace workspace)))
 
-;;;
+;;; ============================================================================
+;;; LSP 模式定义
+;;; ============================================================================
+
+;; *lsp-mode-keymap* - LSP 模式键映射
 (defvar *lsp-mode-keymap* (make-keymap))
 
 (define-key *lsp-mode-keymap* "C-c h" 'lsp-hover)
 
+;; lsp-mode - LSP 次模式
+;; 为缓冲区启用 LSP 功能
 (define-minor-mode lsp-mode
     (:name "LSP"
      :keymap *lsp-mode-keymap*
