@@ -1,6 +1,47 @@
+;;;; buffer.lisp - Lem 编辑器缓冲区系统
+;;;;
+;;;; 本文件实现 Lem 的核心数据结构：缓冲区 (Buffer)。
+;;;; 缓冲区是编辑器的基础，存储文本内容、光标位置、标记、撤销历史等。
+;;;;
+;;;; 核心概念:
+;;;; - Buffer: 文本容器，包含所有编辑状态
+;;;; - Point: 光标位置，指向缓冲区中的特定位置
+;;;; - Mark: 标记对象，用于区域选择
+;;;;
+;;;; 缓冲区结构:
+;;;;   name            - 缓冲区名称
+;;;;   filename        - 关联文件路径
+;;;;   directory       - 工作目录
+;;;;   modified-p      - 修改标志
+;;;;   read-only-p     - 只读标志
+;;;;   syntax-table    - 语法表（用于高亮）
+;;;;   major-mode      - 主模式
+;;;;   minor-modes     - 次模式列表
+;;;;   start-point     - 缓冲区起点
+;;;;   end-point       - 缓冲区终点
+;;;;   point           - 当前光标位置
+;;;;   mark            - 标记对象
+;;;;   edit-history     - 撤销历史
+;;;;   redo-stack       - 重做栈
+;;;;
+;;;; 相关文件:
+;;;;   - point.lisp: Point 类定义
+;;;;   - edit.lisp: 编辑操作
+;;;;   - undo.lisp: 撤销/重做系统
+;;;;   - mark.lisp: 标记系统
+
 (in-package :lem/buffer/internal)
 
+;;; ============================================================================
+;;; 特殊变量
+;;; ============================================================================
+
+;; 临时缓冲区名称（用于内部操作）
 (defparameter +primordial-buffer-name+ "*tmp*")
+
+;;; ============================================================================
+;;; Buffer 类定义
+;;; ============================================================================
 
 (defclass buffer ()
   ((name
@@ -12,8 +53,8 @@
     :type boolean)
    (variables
     :initform (make-hash-table :test 'equal)
-    :accessor buffer-variables)
-   ;; only used in text buffer
+    :accessor buffer-variables
+   ;; 仅用于文本缓冲区
    (%filename
     :initform nil
     :accessor buffer-%filename)
@@ -21,7 +62,7 @@
     :initarg :%directory
     :initform nil
     :accessor buffer-%directory
-    :documentation "The buffer's directory. See: `buffer-directory'.")
+    :documentation "缓冲区的目录。参见: `buffer-directory`")
    (%modified-p
     :initform 0
     :reader buffer-modified-tick
@@ -33,7 +74,6 @@
     :type boolean)
    (%enable-undo-boundary-p
     :initarg :%enable-undo-boundary-p
-    :initform t
     :accessor buffer-%enable-undo-boundary-p)
    (read-only-p
     :initarg :read-only-p
@@ -90,41 +130,76 @@
     :initform nil
     :accessor buffer-last-write-date)
    (points-ring
-    :initform (lem/common/ring::make-ring 16)
-    :accessor buffer-points-ring)))
+    :initform (lem/common/ring:make-ring 16)
+    :accessor buffer-points-ring))
+  (:documentation "缓冲区基类。
+                   存储文本内容和编辑状态。
+                   
+                   主要槽位:
+                   - name: 缓冲区名称
+                   - filename: 关联的文件路径
+                   - directory: 工作目录
+                   - modified-p: 修改次数
+                   - syntax-table: 语法表
+                   - major-mode: 主模式
+                   - minor-modes: 次模式列表
+                   - point: 当前光标
+                   - mark: 标记（区域选择）
+                   - edit-history: 撤销历史
+                   - redo-stack: 重做栈"))
 
+;;; ============================================================================
+;;; 标记钩子
+;;; ============================================================================
+
+;; 标记激活时运行的钩子
 (defvar *buffer-mark-activate-hook* '()
-  "Hook run when mark is activated.")
+  "标记激活时运行的钩子。")
+
+;; 标记停用时运行的钩子
 (defvar *buffer-mark-deactivate-hook* '()
-  "Hook run when mark is inactivated.")
+  "标记停用时运行的钩子。")
+
+;;; ============================================================================
+;;; 文本缓冲区
+;;; ============================================================================
 
 (defclass text-buffer (buffer)
-  ())
+  ()
+  (:documentation "文本缓冲区类。
+                   继承自 buffer，存储可编辑的文本内容。"))
+
+;;; ============================================================================
+;;; 缓冲区访问器
+;;; ============================================================================
 
 (defmethod buffer-mark ((buffer buffer))
+  "返回缓冲区标记的光标位置。"
   (mark-point (buffer-mark-object buffer)))
 
 (defmethod buffer-mark-p ((buffer buffer))
+  "返回标记是否激活。"
   (mark-active-p (buffer-mark-object buffer)))
 
-(setf (documentation 'buffer-point 'function) "Returns the current `point` of `buffer`.")
+;; 文档字符串
+(setf (documentation 'buffer-point 'function)
+    "返回缓冲区的当前光标位置。")
 (setf (documentation 'buffer-mark 'function)
-      "Returns the `point` of the current mark in the `buffer`")
+    "返回缓冲区当前标记的光标位置。")
 (setf (documentation 'buffer-start-point 'function)
-      "Returns the `point` at the start of the `buffer`.")
+    "返回缓冲区起点的光标位置。")
 (setf (documentation 'buffer-end-point 'function)
-      "Returns the `point` at the end of the `buffer`.")
+    "返回缓冲区终点的光标位置。")
 
+;;; ============================================================================
+;;; 全局变量
+;;; ============================================================================
+
+;; 当前缓冲区（动态变量）
 (defvar *current-buffer*)
 
 (defun primordial-buffer ()
-  (make-buffer +primordial-buffer-name+))
-
-(defun current-buffer ()
-  "Return the current buffer."
-  (unless (boundp '*current-buffer*)
-    (setf *current-buffer*
-          (primordial-buffer)))
+  "返回原始缓冲区（编辑器启动时的初始缓冲区）。"
   *current-buffer*)
 
 (defun (setf current-buffer) (buffer)
